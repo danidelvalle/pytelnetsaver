@@ -12,16 +12,27 @@ import select
 import random
 import gzip
 
+# Telnet connection settings
+USER = "user"
+PASSWORD = "password"
 PROMPT = "> "
 TIMEOUT = 5
+
+# Max wait time witout receiving data. This will
+# fire sending and "\n" to avoid the session to expire due to inactivity.
 MAX_WAIT_TIME = 120
+
+# Reconnect to hosts 
 RECONNECT_TIME = 300
-USER = "test"
-PASSWORD = "test"
+
+# Max concurrent threads (-1 for no limit)
 MAX_THREADS = -1
-MAX_FILE_SIZE = 500000 # BYTES
+
+# Rotate log files when (in bytes)
+MAX_FILE_SIZE = 500000
 
 class TelnetLogSaver(threading.Thread):
+	''' 
 	def __init__(self, id, hostname,ip,filename):
 		super(TelnetLogSaver, self).__init__()
 		self.id = id 
