@@ -11,29 +11,15 @@ import logging
 import select
 import random
 import gzip
-
-# Telnet connection settings
-USER = "user"
-PASSWORD = "password"
-PROMPT = "> "
-TIMEOUT = 5
-
-# Max wait time witout receiving data. This will
-# fire sending and "\n" to avoid the session to expire due to inactivity.
-MAX_WAIT_TIME = 120
-
-# Reconnect to hosts 
-RECONNECT_TIME = 300
-
-# Max concurrent threads (-1 for no limit)
-MAX_THREADS = -1
-
-# Rotate log files when (in bytes)
-MAX_FILE_SIZE = 500000
+import ConfigParser
+from optparse import OptionParser, OptionGroup
 
 class TelnetLogSaver(threading.Thread):
-	''' 
-	def __init__(self, id, hostname,ip,filename):
+	''' Thread that connects to a host by telnet and starts to save 
+	to a file all messages readed.
+	'''
+	
+	def __init__(self, id, hostname,ip,filename, options):
 		super(TelnetLogSaver, self).__init__()
 		self.id = id 
 		self.hostname = hostname
@@ -41,6 +27,20 @@ class TelnetLogSaver(threading.Thread):
 		self.filename = filename
 		self.kill_received = False
 		self.daemon = True
+		
+		# Config file options
+		self.user = options["telnet"]["user"]
+		self.password = options["telnet"]["password"]
+		self.prompt = options["telnet"]["prompt"]
+		self.max_wait_time = options["telnet"]["max_wait_time"]
+		self.timeout = options["telnet"]["timeout"]
+		self.expected_user_string = options["telnet"]["expected_user_string"]
+		self.expected_password_string = options["telnet"]["expected_password_string"]
+		self.first_prompt = options["telnet"]["first_prompt"]
+		self.initial_newline = options["telnet"]["initial_newline"]
+		self.telnet_debug = options["telnet"]["telnet_debug"]
+		
+		self.max_file_size = options["output"]["max_file_size"]
 	
 	def info(self, msg):
 		logging.info("%d [%s] - %s" % (self.id,self.hostname,msg))
@@ -56,21 +56,26 @@ class TelnetLogSaver(threading.Thread):
 	
 	def check_and_rotate(self):
 		''' Check the file size and rotate if necessary '''
+		
 		self.debug("checking file size")
 		
 		current_size = os.stat(self.filename).st_size
 		self.debug("Filesize for now is %d bytes" % current_size)
 		
-		if current_size > MAX_FILE_SIZE:
-			self.info("MAX_FILE_SIZE exceeded - rotating file")
+		if current_size > self.max_file_size:
+			self.info("'output.max_file_size' exceeded - rotating file")
 			
 			# Closing the file
 			self.f.close()
 			
 			# Get the file number
 			self.info("getting the file number")
-			files = [ f for f in os.listdir(".") if (os.path.isfile(f) and f.startswith(self.hostname))]
-			new_filename = "%s.%d.gz" % (self.filename, 1+len(files))
+			path = os.path.dirname(self.filename)
+			basename = os.path.basename(self.filename)
+			files = [ f for f in os.listdir(path) if (os.path.join(path,f) and f.startswith(basename))]
+			new_filename = os.path.join(path, "%s.%d.gz" % (basename, 1+len(files)))
+			
+			logging.info("creating new file '%s'" % new_filename)
 			
 			# Compress the file
 			self.info("moving and compressing the file")
@@ -85,6 +90,10 @@ class TelnetLogSaver(threading.Thread):
 			self.f = open(self.filename, "w")
 			
 	def run(self):
+		''' Implements thread logic. It runs an infinite loop until an external kill 
+		signal is received (from the main thread) and waits for data using 'select'.
+		'''	
+		
 		try:
 			# Store current time
 			self.last_run = time.time()	
@@ -93,30 +102,46 @@ class TelnetLogSaver(threading.Thread):
 			self.f = open(self.filename,"a")
 			
 			# Connect by telnet
-			tn = telnetlib.Telnet(self.ip,23,TIMEOUT)
-			#tn.set_debuglevel(1)
+			tn = telnetlib.Telnet(self.ip,23,self.timeout)
+			
+			# Enables telnet debugging
+			if self.telnet_debug == 1:
+				tn.set_debuglevel(1)
 			
 			# workarround to avoid the connection getting stuck at option negociation
 			tn.set_option_negotiation_callback(self.option_negociation)
 			self.info("Connecting to %s" % ( self.ip))
-			e = tn.read_until("Login: ")
-			tn.write(USER+"\n")
 			
-			e = tn.read_until("Password: ")
-			tn.write(PASSWORD+"\n")
+			# first prompt
+			if self.first_prompt is (not None and not ""):
+				self.debug("waiting for first prompt '%s'" % self.first_prompt)
+				e = tn.read_until(self.first_prompt)	
 			
-			e = tn.read_until(PROMPT)
+			# Initial newLine
+			if self.initial_newline == 1:
+				self.debug("sending initial newline character")
+				tn.write("a\n")
+			
+			self.debug("waiting for '%s'" % self.expected_user_string)
+			e = tn.read_until(self.expected_user_string)
+			tn.write(self.user+"\n")
+			
+			self.debug("waiting for '%s'" % self.expected_password_string)
+			e = tn.read_until(self.expected_password_string)
+			tn.write(self.password+"\n")
+			
+			e = tn.read_until(self.prompt)
 			tn.write("\n")
-			e = tn.read_until(PROMPT)
+			e = tn.read_until(self.prompt)
 			self.info("connected successfully, starting infinite loop to save messages")
 			
 			# Connected. Start infinite loop to save messages log
 			last_time_read = time.time()
 			while not self.kill_received:
 				
-				# Wait fot data to be read
+				# Wait fot data to be read using 'select'
 				self.debug("waiting on select for data")
-				read_ready, write_ready, expt_ready = select.select([ tn.get_socket() ],[],[],MAX_WAIT_TIME)
+				read_ready, write_ready, expt_ready = select.select([ tn.get_socket() ],[],[],self.max_wait_time)
 				self.debug("select returned")
 
 				if len(read_ready) == 1:
@@ -132,11 +157,11 @@ class TelnetLogSaver(threading.Thread):
 					self.debug("read %d characters" % (len(readed)))
 
 				# Anti-idle protection
-				if (time.time() - last_time_read) > MAX_WAIT_TIME:
+				if (time.time() - last_time_read) > self.max_wait_time:
 					''' Avoid session auto-idle'''
 					self.debug("Sending intro to avoid session timeout")
 					tn.write("\n")
-					e = tn.read_until(PROMPT,3*TIMEOUT)
+					e = tn.read_until(self.prompt,3*self.timeout)
 					if e is "":
 						self.error("lost connection with %s" % (self.ip))
 						tn.close()
@@ -144,47 +169,142 @@ class TelnetLogSaver(threading.Thread):
 						return	
 				
 				''' At this point session is active because data has been received or 
-				anti-idle has successed'''
+				anti-idle has successed. Check if is necessary to rotate and compress the 
+				log'''
 				self.check_and_rotate()
 				
+				# Update the last iteration time 
 				last_time_read = time.time()
 
 			# gracefull closing
-			self.info("finishing due to kill signal")
+			self.info("finishing due to kill signal, sending 'exit'")
+			tn.write("exit\n")	
 			tn.close()
 			self.f.close()
 			return
 
-		except:
-			self.error("Exception!! Finishing")
+		except Exception as e:
+			self.error(e)
 			self.f.close()
-			#traceback.print_exc()
 			return
 	
 
-def init_logging():
-
+def init_logging(file,level):
+	
 	# Start logging
 	FORMAT = "%(asctime)s - %(levelname)s: %(message)s" 
-	logging.basicConfig(level=logging.INFO,format=FORMAT,filename='log.log')
+	logging.basicConfig(level=level,format=FORMAT,filename=file)
 	# define a Handler which writes INFO messages or higher to the sys.stderr
 	console = logging.StreamHandler()
-	console.setLevel(logging.INFO)
+	console.setLevel(level)
 	# set a format which is simpler for console use
 	formatter = logging.Formatter(FORMAT)
 	# tell the handler to use this format
 	console.setFormatter(formatter)
 	# add the handler to the root logger
 	logging.getLogger('').addHandler(console)
+
+def parse_configfile(cfg_file):
+	
+	# Fields definition
+	required = { 
+			"telnet": [ "user","password","prompt" ],
+			"logging": ["log_file"],
+			"output":["output_dir"]
+			}
+	
+	defaults = {		
+			"max_wait_time": 120,
+			"timeout": 5,
+			"reconnect_interval": 300,
+			"max_threads": -1,
+			"initial_newline": 0,
+			"expected_user_string": "user:",
+			"expected_password_string": "password:",
+			"max_file_size": 120,
+			"first_prompt": "",
+			"telnet_debug": 0
+			}
+
+	# Parsing config file
+	config = ConfigParser.ConfigParser(defaults)
+	
+	config.read(cfg_file)
+	
+	configuration = {"telnet":{},"output":{},"logging":{}}
+	
+	# Telnet
+	configuration["telnet"]["user"] = config.get("telnet","user")
+	configuration["telnet"]["password"] = config.get("telnet","password")
+	configuration["telnet"]["prompt"] = config.get("telnet","prompt").strip('"')
+	configuration["telnet"]["first_prompt"] = config.get("telnet","first_prompt").strip('"')
+	configuration["telnet"]["max_wait_time"] = config.getint("telnet","max_wait_time")
+	configuration["telnet"]["timeout"] = config.getint("telnet","timeout")
+	configuration["telnet"]["reconnect_interval"] = config.getint("telnet","reconnect_interval")
+	configuration["telnet"]["max_threads"] = config.getint("telnet","max_threads")
+	configuration["telnet"]["initial_newline"] = config.getint("telnet","initial_newline")
+	configuration["telnet"]["telnet_debug"] = config.getint("telnet","telnet_debug")
+	
+	configuration["telnet"]["expected_user_string"] = config.get("telnet","expected_user_string").strip('"')
+	configuration["telnet"]["expected_password_string"] = config.get("telnet","expected_password_string").strip('"')
+	
+	# Output
+	configuration["output"]["output_dir"] = config.get("output","output_dir")
+	configuration["output"]["max_file_size"] = config.getint("output","max_file_size")
+	
+	# Logging
+	configuration["logging"]["log_file"] = config.get("logging","log_file")
+
+	# Validation and fill with defaults
+	for category in ["telnet","output","logging"]:
+		# Validations
+		for field in required[category]:
+			if field not in configuration[category]:
+				raise Exception("Invalid cfg file: '%s.%s' field is required" % (category,field))
+	
+	return configuration
+
+def parse_cmdline(argv):
+	"""Parses the command-line."""
+	
+	# Manage command line arguments
+	parser = OptionParser(description='pyTelnetSaver')
+	parser.add_option("-c", "--cfg-file", dest="cfg_file", help="Config file (required)")
+	parser.add_option("-f", "--hosts-file", dest="hosts_file", help="Target host file in CSV format (required)")
+	
+	# Parse the user input		  
+	(options, args) = parser.parse_args()
+	
+	# Check required arguments
+	if (options.cfg_file is None):
+		parser.print_help()
+		parser.error("Config file is required")
+	
+	if options.hosts_file is None:
+		parser.print_help()
+		parser.error("Host file is required")
+	
+	return (options, args)
 	
 if __name__ == '__main__':
 	
+	# parse the command line
+	options, args = parse_cmdline(sys.argv)
+	
+	# parse the cfg file
+	config = parse_configfile(options.cfg_file)
+	try:
+		config = parse_configfile(options.cfg_file)
+	except Exception as e:
+		print e
+		exit(0)
+	
 	# init logging
-	init_logging()
+	init_logging(config["logging"]["log_file"], logging.INFO)
 
 	# Read the host file
-	file = sys.argv[1]
-	mapper = lambda linea: (linea.split(";")[0],linea.split(";")[1].replace("\r\n",""))
+	file = options.hosts_file
+	mapper = lambda line: (line.split(";")[0],line.split(";")[1].replace("\r\n",""))
 	hosts = map(mapper, [l for l in open(file,'r')])
 	random.shuffle(hosts)
 
@@ -192,12 +312,13 @@ if __name__ == '__main__':
 	threads = []
 	t_id = 1
 	for (host,ip) in hosts:
-		t = TelnetLogSaver(t_id,host,ip,host+".txt")
+		host_log_file = "%s/%s.txt" % (config["output"]["output_dir"],host)
+		t = TelnetLogSaver(t_id,host,ip,host_log_file,config)
 		threads.append(t)
 		t_id+=1
 	
 	# Start the threads
-	limit = MAX_THREADS if (MAX_THREADS != -1) else len(hosts)
+	limit = config["telnet"]["max_threads"] if (config["telnet"]["max_threads"] != -1) else len(hosts)
 	effective_threads = threads[:limit]
 	
 	for i in range(0,limit):
@@ -224,9 +345,9 @@ if __name__ == '__main__':
 					if not thread.kill_received:
 						# Check last restart attempt
 						elapsed = time.time() - thread.last_run
-						if elapsed > RECONNECT_TIME:
+						if elapsed > config["telnet"]["reconnect_interval"]:
 							logging.info("%d [%s] has been stopped for %d seconds. Trying to reconnect..." % (thread.id, thread.hostname,elapsed))
-							t = TelnetLogSaver(thread.id,thread.hostname,thread.ip,thread.hostname+".txt")
+							t = TelnetLogSaver(thread.id,thread.hostname,thread.ip,thread.filename,config)
 							effective_threads.append(t)
 							t.start()
 						
@@ -239,7 +360,3 @@ if __name__ == '__main__':
 			traceback.print_exc()
 	
 	logging.info("Bye bye !!")
-#except KeyboardInterrupt:
-#	print "CRTL-C: Clossing session"
-#	tn.write("exit\n")
-#	tn.close()
