@@ -13,21 +13,19 @@ import random
 import gzip
 import ConfigParser
 from optparse import OptionParser, OptionGroup
+from multiprocessing import Process
 
-class TelnetLogSaver(threading.Thread):
+class TelnetLogSaver(telnetlib.Telnet):
 	''' Thread that connects to a host by telnet and starts to save 
 	to a file all messages readed.
 	'''
 	
 	def __init__(self, id, hostname,ip,filename, options):
-		super(TelnetLogSaver, self).__init__()
 		self.id = id 
 		self.hostname = hostname
 		self.ip = ip
 		self.filename = filename
-		self.kill_received = False
-		self.daemon = True
-		
+
 		# Config file options
 		self.user = options["telnet"]["user"]
 		self.password = options["telnet"]["password"]
@@ -39,9 +37,24 @@ class TelnetLogSaver(threading.Thread):
 		self.first_prompt = options["telnet"]["first_prompt"]
 		self.initial_newline = options["telnet"]["initial_newline"]
 		self.telnet_debug = options["telnet"]["telnet_debug"]
-		
 		self.max_file_size = options["output"]["max_file_size"]
+		
+		# Open the file for append
+		self.f = open(self.filename,"a")
+		
+		# Start the telnet session
+		telnetlib.Telnet.__init__(self,ip,23,10)
+		self.init()
+		
+		# To store the filesize
+		self.filesize = self.get_filesize()
 	
+	def get_filesize(self):
+		self.debug("checking file size")
+		current_size = os.stat(self.filename).st_size
+		self.debug("Filesize for now is %d bytes" % current_size)
+		return current_size
+
 	def info(self, msg):
 		logging.info("%d [%s] - %s" % (self.id,self.hostname,msg))
 	
@@ -56,13 +69,9 @@ class TelnetLogSaver(threading.Thread):
 	
 	def check_and_rotate(self):
 		''' Check the file size and rotate if necessary '''
-		
-		self.debug("checking file size")
-		
-		current_size = os.stat(self.filename).st_size
-		self.debug("Filesize for now is %d bytes" % current_size)
-		
-		if current_size > self.max_file_size:
+
+		self.debug("Filesize for now is %d" % self.filesize)
+		if self.filesize > self.max_file_size:
 			self.info("'output.max_file_size' exceeded - rotating file")
 			
 			# Closing the file
@@ -88,105 +97,90 @@ class TelnetLogSaver(threading.Thread):
 			# reopen the file (override)
 			self.info("reopening the file (overriding)")
 			self.f = open(self.filename, "w")
+			self.filesize = 0
 			
-	def run(self):
-		''' Implements thread logic. It runs an infinite loop until an external kill 
-		signal is received (from the main thread) and waits for data using 'select'.
-		'''	
+	
+	def init(self):
+		''' Connects and does additions tasks until prompt is ready'''
+		# Enables telnet debugging
+		if self.telnet_debug == 1:
+			self.set_debuglevel(1)
 		
-		try:
-			# Store current time
-			self.last_run = time.time()	
+		# workarround to avoid the connection getting stuck at option negociation
+		self.set_option_negotiation_callback(self.option_negociation)
+		self.info("Connecting to %s" % ( self.ip))
+		
+		# first prompt
+		if self.first_prompt is (not None and not ""):
+			self.debug("waiting for first prompt '%s'" % self.first_prompt)
+			self.read_until(self.first_prompt)	
+		
+		# Initial newLine
+		if self.initial_newline == 1:
+			self.debug("sending initial newline character")
+			self.write("a\n")
+		
+		self.debug("waiting for '%s'" % self.expected_user_string)
+		self.read_until(self.expected_user_string)
+		self.write(self.user+"\n")
+		
+		self.debug("waiting for '%s'" % self.expected_password_string)
+		self.read_until(self.expected_password_string)
+		self.write(self.password+"\n")
+		
+		self.read_until(self.prompt)
+		self.write("\n")
+		self.read_until(self.prompt)
+		self.info("connected successfully, starting infinite loop to save messages")
+		
+		self.last_time_read = time.time()
+		
+	def read_and_save(self):
 			
-			# Open the file for append
-			self.f = open(self.filename,"a")
+		read = ""
+		self.f.write("\r\n" + datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")+"\r\n")
+		# Read all the data available
+		while self.sock_avail():
+			e = self.read_some()
+			read += e					
+	
+		self.f.write(read)
+		self.f.flush()
+		self.debug("read %d characters" % (len(read)))
+		
+		# Cheack antiidle
+		self.anti_idle()
+		
+		''' At this point session is active because data has been received or 
+		anti-idle has successed. Check if is necessary to rotate and compress the 
+		log'''
+		self.filesize += len(read)
+		self.check_and_rotate()
+		
+		self.last_time_read = time.time()
+	
+	def anti_idle(self):
 			
-			# Connect by telnet
-			tn = telnetlib.Telnet(self.ip,23,self.timeout)
-			
-			# Enables telnet debugging
-			if self.telnet_debug == 1:
-				tn.set_debuglevel(1)
-			
-			# workarround to avoid the connection getting stuck at option negociation
-			tn.set_option_negotiation_callback(self.option_negociation)
-			self.info("Connecting to %s" % ( self.ip))
-			
-			# first prompt
-			if self.first_prompt is (not None and not ""):
-				self.debug("waiting for first prompt '%s'" % self.first_prompt)
-				e = tn.read_until(self.first_prompt)	
-			
-			# Initial newLine
-			if self.initial_newline == 1:
-				self.debug("sending initial newline character")
-				tn.write("a\n")
-			
-			self.debug("waiting for '%s'" % self.expected_user_string)
-			e = tn.read_until(self.expected_user_string)
-			tn.write(self.user+"\n")
-			
-			self.debug("waiting for '%s'" % self.expected_password_string)
-			e = tn.read_until(self.expected_password_string)
-			tn.write(self.password+"\n")
-			
-			e = tn.read_until(self.prompt)
-			tn.write("\n")
-			e = tn.read_until(self.prompt)
-			self.info("connected successfully, starting infinite loop to save messages")
-			
-			# Connected. Start infinite loop to save messages log
-			last_time_read = time.time()
-			while not self.kill_received:
-				
-				# Wait fot data to be read using 'select'
-				self.debug("waiting on select for data")
-				read_ready, write_ready, expt_ready = select.select([ tn.get_socket() ],[],[],self.max_wait_time)
-				self.debug("select returned")
+		# Anti-idle protection
+		if (time.time() - self.last_time_read) > self.max_wait_time:
+			''' Avoid session auto-idle'''
+			self.debug("Sending intro to avoid session timeout")
+			self.write("\n")
+			e = self.read_until(self.prompt,3*self.timeout)
+			if e is "":
+				self.error("lost connection with %s" % (self.ip))
+				self.close()
+				self.f.close()
+				return	
 
-				if len(read_ready) == 1:
-					readed = ""
-					self.f.write("\r\n" + datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")+"\r\n")
-					# Read all the data available
-					while tn.sock_avail():
-						e = tn.read_some()
-						readed += e					
-				
-					self.f.write(readed)
-					self.f.flush()
-					self.debug("read %d characters" % (len(readed)))
-
-				# Anti-idle protection
-				if (time.time() - last_time_read) > self.max_wait_time:
-					''' Avoid session auto-idle'''
-					self.debug("Sending intro to avoid session timeout")
-					tn.write("\n")
-					e = tn.read_until(self.prompt,3*self.timeout)
-					if e is "":
-						self.error("lost connection with %s" % (self.ip))
-						tn.close()
-						self.f.close()
-						return	
-				
-				''' At this point session is active because data has been received or 
-				anti-idle has successed. Check if is necessary to rotate and compress the 
-				log'''
-				self.check_and_rotate()
-				
-				# Update the last iteration time 
-				last_time_read = time.time()
-
-			# gracefull closing
-			self.info("finishing due to kill signal, sending 'exit'")
-			tn.write("exit\n")	
-			tn.close()
-			self.f.close()
-			return
-
-		except Exception as e:
-			self.error(e)
-			self.f.close()
-			return
+	
+	def finish(self):
+		# gracefull closing
+		self.info("finishing due to kill signal, sending 'exit'")
+		self.write("exit\n")	
+		self.close()
+		self.f.close()
+		return
 	
 
 def init_logging(file,level):
@@ -285,6 +279,52 @@ def parse_cmdline(argv):
 		parser.error("Host file is required")
 	
 	return (options, args)
+
+
+def run_chunk(id,chunk,config):
+	try:
+		# Create the array of threads
+		logging.debug("creating telnet savers")
+		telnet_savers = []
+		t_id = 1
+		
+		for (host,ip) in chunk:
+			
+			host_log_file = "%s/%s.txt" % (config["output"]["output_dir"],host)
+			
+			try:
+				t = TelnetLogSaver(t_id,host,ip,host_log_file,config)
+				telnet_savers.append(t)
+			except:
+				logging.error("Cannot connect to host %s(%s)" % (ip,host))
+				
+			t_id+=1
+	
+		last_loop = time.time()
+		while True:
+			# Wait for data on all telnets
+			read_ready, write_ready, error = select.select(telnet_savers, [], [])
+			
+			logging.debug("P%s select returned, data from %d hosts" % (id,len(read_ready)))
+			
+			# Read and save
+			for telnet in read_ready:
+				telnet.read_and_save()
+			
+			# Check anti-idle
+			if (time.time() - last_loop) > config["telnet"]["max_wait_time"]:
+				logging.debug("P%s checking idle periods" % (id))
+				for telnet in telnet_savers:
+					telnet.anti_idle()
+			
+			last_loop = time.time()
+			
+	except KeyboardInterrupt:
+			logging.info("Ctrl-c received! Sending kill to threads...")
+			for t in telnet_savers:
+				t.finish()
+			exit(0)	
+
 	
 if __name__ == '__main__':
 	
@@ -303,60 +343,36 @@ if __name__ == '__main__':
 	init_logging(config["logging"]["log_file"], logging.INFO)
 
 	# Read the host file
+	logging.debug("parsing host file")
 	file = options.hosts_file
 	mapper = lambda line: (line.split(";")[0],line.split(";")[1].replace("\r\n",""))
 	hosts = map(mapper, [l for l in open(file,'r')])
 	random.shuffle(hosts)
-
-	# Create the array of threads
-	threads = []
-	t_id = 1
-	for (host,ip) in hosts:
-		host_log_file = "%s/%s.txt" % (config["output"]["output_dir"],host)
-		t = TelnetLogSaver(t_id,host,ip,host_log_file,config)
-		threads.append(t)
-		t_id+=1
 	
-	# Start the threads
-	limit = config["telnet"]["max_threads"] if (config["telnet"]["max_threads"] != -1) else len(hosts)
-	effective_threads = threads[:limit]
+	# Create the chunks and init the processes
+	CHUNK_SIZE = 30
+	chunks = [ hosts[i:i+CHUNK_SIZE] for i in xrange(0,len(hosts),CHUNK_SIZE)]
 	
-	for i in range(0,limit):
-		effective_threads[i].start()
-	
-	# Wait and auto-remove died threads
-	it=0
-	while len(effective_threads) > 0:
-		try:
-			for thread in effective_threads:	
-				# Log each 60sec aprox how many threads are running
-				it += 1
-				if it%120 == 0:
-					logging.info("%d threads running" % len(effective_threads))
+	# Start the processes
+	try:
+		processes = []
+		for i in xrange(0,len(chunks)):
+			chunk = chunks[i]
 				
-				if thread.isAlive():
-					logging.debug("%d is running - joining" % thread.id)
-					thread.join(1)
-				else:
-					logging.debug("%d - %s: is not running" % (thread.id, thread.hostname))
-					effective_threads.remove(thread)
-					
-					# Try lo restart the thread
-					if not thread.kill_received:
-						# Check last restart attempt
-						elapsed = time.time() - thread.last_run
-						if elapsed > config["telnet"]["reconnect_interval"]:
-							logging.info("%d [%s] has been stopped for %d seconds. Trying to reconnect..." % (thread.id, thread.hostname,elapsed))
-							t = TelnetLogSaver(thread.id,thread.hostname,thread.ip,thread.filename,config)
-							effective_threads.append(t)
-							t.start()
-						
-		except KeyboardInterrupt:
-			logging.info("Ctrl-c received! Sending kill to threads...")
-			for t in effective_threads:
-				t.kill_received = True
-		except:
-			logging.error("Main thread exception")
-			traceback.print_exc()
-	
-	logging.info("Bye bye !!")
+			logging.debug("Instanciando Process#%d" % i)
+			
+			p = Process(target=run_chunk,args=(i, chunk,config))
+			#p.daemon = True
+			p.start()
+			processes.append(p)
+		
+		# Wait for the processes to expire
+		for p in processes:
+			p.join()
+
+	except KeyboardInterrupt:
+			logging.info("Ctrl-c received! Sending kill to processes...")
+			for p in processes:
+				p.terminate()
+		
+
