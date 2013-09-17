@@ -211,7 +211,8 @@ def parse_configfile(cfg_file):
 			"max_wait_time": 120,
 			"timeout": 5,
 			"reconnect_interval": 300,
-			"max_threads": -1,
+			"max_processes": -1,
+			"chunk_size": 30,
 			"initial_newline": 0,
 			"expected_user_string": "user:",
 			"expected_password_string": "password:",
@@ -235,7 +236,8 @@ def parse_configfile(cfg_file):
 	configuration["telnet"]["max_wait_time"] = config.getint("telnet","max_wait_time")
 	configuration["telnet"]["timeout"] = config.getint("telnet","timeout")
 	configuration["telnet"]["reconnect_interval"] = config.getint("telnet","reconnect_interval")
-	configuration["telnet"]["max_threads"] = config.getint("telnet","max_threads")
+	configuration["telnet"]["max_processes"] = config.getint("telnet","max_processes")
+	configuration["telnet"]["chunk_size"] = config.getint("telnet","chunk_size")
 	configuration["telnet"]["initial_newline"] = config.getint("telnet","initial_newline")
 	configuration["telnet"]["telnet_debug"] = config.getint("telnet","telnet_debug")
 	
@@ -363,11 +365,20 @@ if __name__ == '__main__':
 	random.shuffle(hosts)
 	
 	# Create the chunks and init the processes
-	CHUNK_SIZE = 30
-	limit = config["telnet"]["max_threads"] if (config["telnet"]["max_threads"] != -1) else len(hosts)
-	effective_hosts = hosts[:limit]
-	chunks = [ effective_hosts[i:i+CHUNK_SIZE] for i in xrange(0,limit,CHUNK_SIZE)]
 	
+	CHUNK_SIZE = config["telnet"]["chunk_size"]
+	MAX_PROCESSES = config["telnet"]["max_processes"]
+	
+	if MAX_PROCESSES is -1:
+		limit = len(hosts)
+	else:
+		MAX_HOSTS = CHUNK_SIZE * MAX_PROCESSES
+		limit = len(hosts) if (len(hosts)<MAX_HOSTS) else MAX_HOSTS
+
+	chunks = [ hosts[i:i+CHUNK_SIZE] for i in xrange(0,limit,CHUNK_SIZE)]
+	
+	logging.info("Starting %d processes with %d hosts per process" % (len(chunks),CHUNK_SIZE ))
+	exit(0)
 	# Start the processes
 	try:
 		processes = []
