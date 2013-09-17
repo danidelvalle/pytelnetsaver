@@ -78,16 +78,16 @@ class TelnetLogSaver(telnetlib.Telnet):
 			self.f.close()
 			
 			# Get the file number
-			self.info("getting the file number")
+			self.debug("getting the file number")
 			path = os.path.dirname(self.filename)
 			basename = os.path.basename(self.filename)
 			files = [ f for f in os.listdir(path) if (os.path.join(path,f) and f.startswith(basename))]
 			new_filename = os.path.join(path, "%s.%d.gz" % (basename, 1+len(files)))
 			
-			logging.info("creating new file '%s'" % new_filename)
+			logging.debug("creating new file '%s'" % new_filename)
 			
 			# Compress the file
-			self.info("moving and compressing the file")
+			self.debug("moving and compressing the file")
 			f_in = open(self.filename, 'rb')
 			f_out = gzip.open(new_filename, 'wb')
 			f_out.writelines(f_in)
@@ -95,7 +95,7 @@ class TelnetLogSaver(telnetlib.Telnet):
 			f_in.close()
 			
 			# reopen the file (override)
-			self.info("reopening the file (overriding)")
+			self.debug("reopening the file (overriding)")
 			self.f = open(self.filename, "w")
 			self.filesize = 0
 			
@@ -108,7 +108,7 @@ class TelnetLogSaver(telnetlib.Telnet):
 		
 		# workarround to avoid the connection getting stuck at option negociation
 		self.set_option_negotiation_callback(self.option_negociation)
-		self.info("Connecting to %s" % ( self.ip))
+		self.debug("Connecting to %s" % ( self.ip))
 		
 		# first prompt
 		if self.first_prompt is (not None and not ""):
@@ -131,7 +131,7 @@ class TelnetLogSaver(telnetlib.Telnet):
 		self.read_until(self.prompt)
 		self.write("\n")
 		self.read_until(self.prompt)
-		self.info("connected successfully, starting infinite loop to save messages")
+		self.debug("connected successfully, starting infinite loop to save messages")
 		
 		self.last_time_read = time.time()
 		
@@ -283,11 +283,13 @@ def parse_cmdline(argv):
 
 def run_chunk(id,chunk,config):
 	try:
+		telnet_savers = []
+		unavailable_savers = []
+		
 		# Create the array of threads
 		logging.debug("creating telnet savers")
-		telnet_savers = []
-		t_id = 1
 		
+		t_id = 1
 		for (host,ip) in chunk:
 			
 			host_log_file = "%s/%s.txt" % (config["output"]["output_dir"],host)
@@ -297,25 +299,36 @@ def run_chunk(id,chunk,config):
 				telnet_savers.append(t)
 			except:
 				logging.error("Cannot connect to host %s(%s)" % (ip,host))
+				unavailable_savers.append((t_id,host,ip,host_log_file,config))
 				
 			t_id+=1
 	
+		# Init loop to wait for data to be read
+		logging.info("Starting waiting loop, %d hosts (%d hosts unavailable)" % (len(telnet_savers), len(unavailable_savers)))
 		last_loop = time.time()
-		while True:
+		while len(telnet_savers)>0:
 			# Wait for data on all telnets
-			read_ready, write_ready, error = select.select(telnet_savers, [], [])
+			read_ready, write_ready, error = select.select(telnet_savers, [], [], config["telnet"]["max_wait_time"])
 			
 			logging.debug("P%s select returned, data from %d hosts" % (id,len(read_ready)))
-			
 			# Read and save
 			for telnet in read_ready:
-				telnet.read_and_save()
-			
+				try:
+					telnet.read_and_save()
+				except:
+					logging.error("P%d - read_and_save error with host %s(%s)" %(id,telnet.ip, telnet.hostname))
+					telnet_savers.remove(telnet)
+					
+					
 			# Check anti-idle
 			if (time.time() - last_loop) > config["telnet"]["max_wait_time"]:
 				logging.debug("P%s checking idle periods" % (id))
 				for telnet in telnet_savers:
-					telnet.anti_idle()
+					try:
+						telnet.anti_idle()
+					except:
+						logging.error("P%d - anti_idle error with host %s(%s)" %(id,telnet.ip, telnet.hostname))
+						telnet_savers.remove(telnet)
 			
 			last_loop = time.time()
 			
@@ -351,7 +364,9 @@ if __name__ == '__main__':
 	
 	# Create the chunks and init the processes
 	CHUNK_SIZE = 30
-	chunks = [ hosts[i:i+CHUNK_SIZE] for i in xrange(0,len(hosts),CHUNK_SIZE)]
+	limit = config["telnet"]["max_threads"] if (config["telnet"]["max_threads"] != -1) else len(hosts)
+	effective_hosts = hosts[:limit]
+	chunks = [ effective_hosts[i:i+CHUNK_SIZE] for i in xrange(0,limit,CHUNK_SIZE)]
 	
 	# Start the processes
 	try:
