@@ -39,6 +39,9 @@ class TelnetLogSaver(telnetlib.Telnet):
 		self.telnet_debug = options["telnet"]["telnet_debug"]
 		self.max_file_size = options["output"]["max_file_size"]
 		
+		self.initial_commands =  options["telnet"]["initial_commands"]
+		self.initial_expects =  options["telnet"]["initial_expects"]
+		
 		# Open the file for append
 		self.f = open(self.filename,"a")
 		
@@ -131,8 +134,19 @@ class TelnetLogSaver(telnetlib.Telnet):
 		self.read_until(self.prompt)
 		self.write("\n")
 		self.read_until(self.prompt)
-		self.debug("connected successfully, starting infinite loop to save messages")
 		
+		# Initial commands
+		if len(self.initial_commands) > 0:
+			self.info("Sending initial commands")
+			for index in range(0,len(self.initial_commands)):
+				command = self.initial_commands[index]
+				expect = self.initial_expects[index]
+				logging.debug("Sending initial command %d: %s" %(index,command))
+				self.write(command+"\n")
+				logging.debug("Waiting for initial expect %d: %s" %(index,expect))
+				self.read_until(expect)
+		
+		self.debug("connected successfully, starting infinite loop to save messages")
 		self.last_time_read = time.time()
 		
 	def read_and_save(self):
@@ -218,7 +232,9 @@ def parse_configfile(cfg_file):
 			"expected_password_string": "password:",
 			"max_file_size": 120,
 			"first_prompt": "",
-			"telnet_debug": 0
+			"telnet_debug": 0,
+			"initial_expects": "",
+			"initial_commands": "",
 			}
 
 	# Parsing config file
@@ -240,9 +256,22 @@ def parse_configfile(cfg_file):
 	configuration["telnet"]["chunk_size"] = config.getint("telnet","chunk_size")
 	configuration["telnet"]["initial_newline"] = config.getint("telnet","initial_newline")
 	configuration["telnet"]["telnet_debug"] = config.getint("telnet","telnet_debug")
-	
 	configuration["telnet"]["expected_user_string"] = config.get("telnet","expected_user_string").strip('"')
 	configuration["telnet"]["expected_password_string"] = config.get("telnet","expected_password_string").strip('"')
+	
+	''' Initial commands and expects - custom list parsing. Assumed '|' separator. Both params 
+	must have the same number of members, otherwise this feature is ignored.
+	'''
+	initial_commands = config.get("telnet","initial_commands")
+	initial_expects = config.get("telnet","initial_expects")
+
+	if initial_commands is not None and len(initial_commands) > 2 and \
+	   initial_expects is not None and len(initial_expects) > 2 and \
+	   len(initial_commands.strip('"').split('|')) == len(initial_expects.strip('"').split('|')):
+
+		configuration["telnet"]["initial_commands"] = initial_commands.strip('"').split('|')
+		configuration["telnet"]["initial_expects"] = initial_expects.strip('"').split('|')
+	
 	
 	# Output
 	configuration["output"]["output_dir"] = config.get("output","output_dir")
@@ -365,7 +394,6 @@ if __name__ == '__main__':
 	random.shuffle(hosts)
 	
 	# Create the chunks and init the processes
-	
 	CHUNK_SIZE = config["telnet"]["chunk_size"]
 	MAX_PROCESSES = config["telnet"]["max_processes"]
 	
@@ -377,9 +405,8 @@ if __name__ == '__main__':
 
 	chunks = [ hosts[i:i+CHUNK_SIZE] for i in xrange(0,limit,CHUNK_SIZE)]
 	
-	logging.info("Starting %d processes with %d hosts per process" % (len(chunks),CHUNK_SIZE ))
-	exit(0)
 	# Start the processes
+	logging.info("Starting %d processes with %d hosts per process" % (len(chunks),CHUNK_SIZE ))
 	try:
 		processes = []
 		for i in xrange(0,len(chunks)):
