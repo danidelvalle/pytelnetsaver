@@ -39,6 +39,8 @@ class TelnetLogSaver(threading.Thread):
 		self.first_prompt = options["telnet"]["first_prompt"]
 		self.initial_newline = options["telnet"]["initial_newline"]
 		self.telnet_debug = options["telnet"]["telnet_debug"]
+		self.initial_commands =  options["telnet"]["initial_commands"]
+		self.initial_expects =  options["telnet"]["initial_expects"] 
 		
 		self.max_file_size = options["output"]["max_file_size"]
 	
@@ -133,6 +135,18 @@ class TelnetLogSaver(threading.Thread):
 			e = tn.read_until(self.prompt)
 			tn.write("\n")
 			e = tn.read_until(self.prompt)
+			
+			# Initial commands
+			if len(self.initial_commands) > 0:
+			  self.info("Sending initial commands")
+			  for index in range(0,len(self.initial_commands)):
+				command = self.initial_commands[index]
+				expect = self.initial_expects[index]
+				self.debug("Sending initial command %d: %s" %(index,command))
+				tn.write(command+"\n")
+				self.debug("Waiting for initial expect %d: %s" %(index,expect))
+				tn.read_until(expect)
+			
 			self.info("connected successfully, starting infinite loop to save messages")
 			
 			# Connected. Start infinite loop to save messages log
@@ -145,16 +159,21 @@ class TelnetLogSaver(threading.Thread):
 				self.debug("select returned")
 
 				if len(read_ready) == 1:
-					readed = ""
+					read = ""
 					self.f.write("\r\n" + datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")+"\r\n")
 					# Read all the data available
 					while tn.sock_avail():
 						e = tn.read_some()
-						readed += e					
-				
-					self.f.write(readed)
+						read += e					
+					
+					self.debug("About to write %d characters to file" % len(read))
+					self.f.write(read)
+					self.debug("About to flushing file")
 					self.f.flush()
-					self.debug("read %d characters" % (len(readed)))
+					self.debug("read %d characters" % (len(read)))
+				
+				else:
+					self.debug("Select returned by no sockets to read from")
 
 				# Anti-idle protection
 				if (time.time() - last_time_read) > self.max_wait_time:
@@ -223,7 +242,9 @@ def parse_configfile(cfg_file):
 			"expected_password_string": "password:",
 			"max_file_size": 120,
 			"first_prompt": "",
-			"telnet_debug": 0
+			"telnet_debug": 0,
+			"initial_expects": "",
+			"initial_commands": "",
 			}
 
 	# Parsing config file
@@ -244,9 +265,22 @@ def parse_configfile(cfg_file):
 	configuration["telnet"]["max_threads"] = config.getint("telnet","max_threads")
 	configuration["telnet"]["initial_newline"] = config.getint("telnet","initial_newline")
 	configuration["telnet"]["telnet_debug"] = config.getint("telnet","telnet_debug")
-	
 	configuration["telnet"]["expected_user_string"] = config.get("telnet","expected_user_string").strip('"')
 	configuration["telnet"]["expected_password_string"] = config.get("telnet","expected_password_string").strip('"')
+	
+	''' Initial commands and expects - custom list parsing. Assumed '|' separator. Both params
+	must have the same number of members, otherwise this feature is ignored.
+	'''
+	initial_commands = config.get("telnet","initial_commands")
+	initial_expects = config.get("telnet","initial_expects")
+	
+	if 	initial_commands is not None and len(initial_commands) > 2 and \
+		initial_expects is not None and len(initial_expects) > 2 and \
+		len(initial_commands.strip('"').split('|')) == len(initial_expects.strip('"').split('|')):
+	
+		configuration["telnet"]["initial_commands"] = initial_commands.strip('"').split('|')
+		configuration["telnet"]["initial_expects"] = initial_expects.strip('"').split('|')
+	
 	
 	# Output
 	configuration["output"]["output_dir"] = config.get("output","output_dir")
@@ -300,7 +334,7 @@ if __name__ == '__main__':
 		exit(0)
 	
 	# init logging
-	init_logging(config["logging"]["log_file"], logging.INFO)
+	init_logging(config["logging"]["log_file"], logging.DEBUG)
 
 	# Read the host file
 	file = options.hosts_file
@@ -318,7 +352,11 @@ if __name__ == '__main__':
 		t_id+=1
 	
 	# Start the threads
-	limit = config["telnet"]["max_threads"] if (config["telnet"]["max_threads"] != -1) else len(hosts)
+	if config["telnet"]["max_threads"] == -1:
+		limit = len(hosts)
+	else:
+		limit = min(len(hosts),config["telnet"]["max_threads"])
+
 	effective_threads = threads[:limit]
 	
 	for i in range(0,limit):
