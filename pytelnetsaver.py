@@ -13,6 +13,7 @@ import random
 import gzip
 import ConfigParser
 from optparse import OptionParser, OptionGroup
+from pprint import pprint
 
 class TelnetLogSaver(threading.Thread):
 	''' Thread that connects to a host by telnet and starts to save 
@@ -39,8 +40,20 @@ class TelnetLogSaver(threading.Thread):
 		self.first_prompt = options["telnet"]["first_prompt"]
 		self.initial_newline = options["telnet"]["initial_newline"]
 		self.telnet_debug = options["telnet"]["telnet_debug"]
-		self.initial_commands =  options["telnet"]["initial_commands"]
-		self.initial_expects =  options["telnet"]["initial_expects"] 
+		
+		self.exec_initial_commands = False
+		if "initial_commands" in options["telnet"]:
+			self.exec_initial_commands = True
+			self.initial_commands =  options["telnet"]["initial_commands"]
+			self.initial_expects =  options["telnet"]["initial_expects"] 
+		
+		self.exec_recurrent_commands = False
+		if "recurrent_commands" in options["telnet"]:
+			 self.exec_recurrent_commands = True
+			 self.recurrent_commands =  options["telnet"]["recurrent_commands"]
+			 self.recurrent_expects =  options["telnet"]["recurrent_expects"]
+			 self.recurrent_period =  options["telnet"]["recurrent_period"]
+			 self.last_exec_recurrent = 0
 		
 		self.max_file_size = options["output"]["max_file_size"]
 	
@@ -55,6 +68,25 @@ class TelnetLogSaver(threading.Thread):
 		
 	def option_negociation(self, socket, command, option):
 		logging.debug("dummy option_negociation")
+		
+	def check_recurrent_commands(self,tn):
+		if self.exec_recurrent_commands:
+			self.debug("check_recurrent_commands")
+			elapsed = time.time() - self.last_exec_recurrent
+			if elapsed > self.recurrent_period:
+				self.info("Recurrent Exec Period reached: executing commands")
+
+				for index in range(0,len(self.recurrent_commands)):
+					command = self.recurrent_commands[index]
+					expect = self.recurrent_expects[index]
+					self.debug("Sending recurrent command %d: %s" %(index,command))
+					tn.write(command+"\n")
+					self.debug("Waiting for recurrent expect %d: %s" %(index,expect))
+					response = tn.read_until(expect)
+					self.f.write(response)
+				
+				self.last_exec_recurrent = time.time()
+				
 	
 	def check_and_rotate(self):
 		''' Check the file size and rotate if necessary '''
@@ -137,7 +169,7 @@ class TelnetLogSaver(threading.Thread):
 			e = tn.read_until(self.prompt)
 			
 			# Initial commands
-			if len(self.initial_commands) > 0:
+			if self.exec_initial_commands:
 			  self.info("Sending initial commands")
 			  for index in range(0,len(self.initial_commands)):
 				command = self.initial_commands[index]
@@ -192,6 +224,9 @@ class TelnetLogSaver(threading.Thread):
 				log'''
 				self.check_and_rotate()
 				
+				''' Recurrent commands '''
+				self.check_recurrent_commands(tn)
+				
 				# Update the last iteration time 
 				last_time_read = time.time()
 
@@ -245,6 +280,9 @@ def parse_configfile(cfg_file):
 			"telnet_debug": 0,
 			"initial_expects": "",
 			"initial_commands": "",
+			"recurrent_expects": "",
+			"recurrent_commands": "",
+			"recurrent_period": 0,
 			}
 
 	# Parsing config file
@@ -281,6 +319,19 @@ def parse_configfile(cfg_file):
 		configuration["telnet"]["initial_commands"] = initial_commands.strip('"').split('|')
 		configuration["telnet"]["initial_expects"] = initial_expects.strip('"').split('|')
 	
+	''' Initial commands and expects - custom list parsing. Assumed '|' separator. Both params
+	must have the same number of members, otherwise this feature is ignored.
+	'''
+	recurrent_commands = config.get("telnet","recurrent_commands")
+	recurrent_expects = config.get("telnet","recurrent_expects")
+	configuration["telnet"]["recurrent_period"] = config.getint("telnet","recurrent_period")
+	
+	if 	recurrent_commands is not None and len(recurrent_commands) > 2 and \
+		recurrent_expects is not None and len(recurrent_expects) > 2 and \
+		len(recurrent_commands.strip('"').split('|')) == len(recurrent_expects.strip('"').split('|')):
+	
+		configuration["telnet"]["recurrent_commands"] = recurrent_commands.strip('"').split('|')
+		configuration["telnet"]["recurrent_expects"] = recurrent_expects.strip('"').split('|')
 	
 	# Output
 	configuration["output"]["output_dir"] = config.get("output","output_dir")
@@ -305,6 +356,7 @@ def parse_cmdline(argv):
 	parser = OptionParser(description='pyTelnetSaver')
 	parser.add_option("-c", "--cfg-file", dest="cfg_file", help="Config file (required)")
 	parser.add_option("-f", "--hosts-file", dest="hosts_file", help="Target host file in CSV format (required)")
+	parser.add_option("-v", "--verbose", dest="verbose", action="store_true")
 	
 	# Parse the user input		  
 	(options, args) = parser.parse_args()
@@ -332,10 +384,14 @@ if __name__ == '__main__':
 	except Exception as e:
 		print e
 		exit(0)
+		
+	pprint(config)
+	#exit(0)
 	
 	# init logging
-	init_logging(config["logging"]["log_file"], logging.DEBUG)
-
+	level = logging.DEBUG if options.verbose else logging.INFO
+	init_logging(config["logging"]["log_file"], level)
+	
 	# Read the host file
 	file = options.hosts_file
 	mapper = lambda line: (line.split(";")[0],line.split(";")[1].replace("\r\n",""))
