@@ -31,6 +31,7 @@ class TelnetLogSaver(threading.Thread):
 		
 		# Config file options
 		self.user = options["telnet"]["user"]
+		self.port = options["telnet"]["port"]
 		self.password = options["telnet"]["password"]
 		self.prompt = options["telnet"]["prompt"]
 		self.max_wait_time = options["telnet"]["max_wait_time"]
@@ -136,7 +137,7 @@ class TelnetLogSaver(threading.Thread):
 			self.f = open(self.filename,"a")
 			
 			# Connect by telnet
-			tn = telnetlib.Telnet(self.ip,23,self.timeout)
+			tn = telnetlib.Telnet(self.ip,self.port,self.timeout)
 			
 			# Enables telnet debugging
 			if self.telnet_debug == 1:
@@ -267,7 +268,8 @@ def parse_configfile(cfg_file):
 			"output":["output_dir"]
 			}
 	
-	defaults = {		
+	defaults = {	
+			"port": 23,
 			"max_wait_time": 120,
 			"timeout": 5,
 			"reconnect_interval": 300,
@@ -295,6 +297,7 @@ def parse_configfile(cfg_file):
 	# Telnet
 	configuration["telnet"]["user"] = config.get("telnet","user")
 	configuration["telnet"]["password"] = config.get("telnet","password")
+	configuration["telnet"]["port"] = config.getint("telnet","port")
 	configuration["telnet"]["prompt"] = config.get("telnet","prompt").strip('"')
 	configuration["telnet"]["first_prompt"] = config.get("telnet","first_prompt").strip('"')
 	configuration["telnet"]["max_wait_time"] = config.getint("telnet","max_wait_time")
